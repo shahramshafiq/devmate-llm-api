@@ -1,136 +1,150 @@
-# DevMate
+<div align="center">
 
-DevMate is a personal assistant built with FastAPI and the OpenAI API. It manages a to-do list, answers general questions, decides on its own when to reach for a tool (checking the date, searching the web, or touching your to-do list), remembers things about you across sessions, and pushes back when someone tries to talk it out of its own rules.
+# DevMate LLM API
 
-This project builds directly on an earlier one, the Event Processing System (FastAPI), and reuses its discipline on purpose: consistent error responses, structured logging, lifespan-managed shared resources, and SSE for streaming.
+A FastAPI backend for a tool-calling personal assistant with streaming replies, layered memory, and guardrails.
 
-## Features
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-Async%20API-009688?style=flat-square&logo=fastapi&logoColor=white)
+![OpenAI](https://img.shields.io/badge/OpenAI-Chat%20Completions-412991?style=flat-square&logo=openai&logoColor=white)
+![Valkey](https://img.shields.io/badge/Valkey-Short--term%20memory-6983FF?style=flat-square&logoColor=white)
+![NeMo Guardrails](https://img.shields.io/badge/NeMo-Guardrails-76B900?style=flat-square&logo=nvidia&logoColor=white)
 
-- **Chat**: `POST /chat`, a normal request/response conversation with the assistant
-- **Streaming**: `GET /chat/stream`, the same conversation delivered token by token over Server-Sent Events
-- **Tool calling**: the model decides for itself when it needs help, and can reach for:
-  - a date/time tool, for "today," "tomorrow," or "3 days from now"
-  - a Tavily web search tool, for anything current or outside its own knowledge
-  - a to-do list tool (add, list, complete, delete), stored per user
-- **Memory**
-  - short-term: the last 10 turns of a conversation, kept in Valkey
-  - long-term: durable facts about a user (preferences, habits), extracted automatically after each turn and kept in a JSON file per user
-- **Guardrails**: NeMo Guardrails checks messages on the way in and replies on the way out, and has held up against 5 jailbreak attempts and a tool-result prompt injection test
-- **Cost tracking**: every reply reports its own token usage and dollar cost, plus a running total for the session
+</div>
 
-## Tech stack
+## Overview
 
-- [FastAPI](https://fastapi.tiangolo.com/): web framework
-- [OpenAI Python SDK](https://github.com/openai/openai-python): the model, via Chat Completions
-- [Valkey](https://valkey.io/): short-term conversation memory
-- [httpx](https://www.python-httpx.org/): the shared async client used for Tavily calls
-- [NeMo Guardrails](https://github.com/NVIDIA-NeMo/Guardrails): input/output guardrails
-- [Pydantic](https://docs.pydantic.dev/) / `pydantic-settings`: request validation and configuration
+DevMate is a personal assistant exposed as an HTTP API. A client sends chat messages, and the model decides on its own when to check the date, search the web, or manage the user's to-do list. Short-term conversation history is kept in Valkey, durable facts about each user are extracted in the background and saved to JSON, and NeMo Guardrails screen messages on the way in and replies on the way out. Every reply reports its token usage and dollar cost.
 
-## Project structure
+## Key Features
 
-```
+- **Chat endpoint**: `POST /chat` returns the reply together with per-turn and per-session token counts and cost.
+- **Streaming**: `GET /chat/stream` delivers the reply over Server-Sent Events as JSON events (`content`, `done`, `error`), so line breaks inside the model output do not break the stream.
+- **Tool calling**: the model can call six tools: current date/time with a day offset, Tavily web search (up to 3 attempts, 5 results), and per-user to-do add, list, complete and delete. Token usage from both model calls is summed when a tool is used.
+- **Layered memory**: the last 10 turns (20 messages) per user and session are kept in Valkey, and a background task asks the model to extract durable facts about the user, de-duplicates them, and stores them in a per-user JSON file.
+- **Guardrails**: NeMo Guardrails self-check flows run on every input and output using the policy in `app/guardrails/prompts.yml`. User text is also wrapped in `<user_input>` tags, and the system prompt tells the model to ignore override attempts.
+- **Cost tracking**: cost is computed from `INPUT_PRICE` and `OUTPUT_PRICE` (per 1M tokens) and accumulated per session.
+- **Validated requests and consistent errors**: temperature, top_p and max_tokens are range-checked, blank messages are rejected, and failures come back as `{"error": ..., "message": ...}` with 422, 502 or 500.
+
+## Tech Stack
+
+| Area | Technology |
+|---|---|
+| Language | Python 3.12 |
+| Web framework | FastAPI, Uvicorn |
+| LLM | OpenAI Python SDK (Chat Completions, default model `gpt-4.1-mini`) |
+| Safety | NeMo Guardrails (self check input and self check output) |
+| Memory | Valkey (short-term history), per-user JSON files (long-term facts, to-do lists) |
+| HTTP client | httpx (shared async client for Tavily search) |
+| Validation and config | Pydantic, pydantic-settings |
+
+## Project Structure
+
+```text
 app/
-├── config/          # environment-driven settings (pydantic-settings)
-├── guardrails/       # NeMo Guardrails config.yml + prompts.yml
-├── lifespan/          # startup/shutdown: openai client, http client, valkey, guardrails
-├── main.py            # app assembly + the global validation-error handler
-├── prompts/           # the system prompt and the <user_input> wrapper
-├── routes/            # HTTP layer: /chat and /chat/stream
-├── schemas/           # request/response models (Pydantic)
-├── services/           # business logic: llm, memory, session totals, guardrails
-├── tools/              # the three LLM-callable tools
-└── utils/               # error shape, logging setup, cost math
-
-data/
-├── memory/            # long-term facts, one JSON file per user
-└── todos/               # to-do lists, one JSON file per user
-
+  main.py        # FastAPI app, router, validation error handler
+  config/        # Settings loaded from environment / .env
+  lifespan/      # Startup and shutdown: OpenAI, httpx, Valkey, guardrails
+  routes/        # POST /chat and GET /chat/stream
+  schemas/       # Request and response models
+  services/      # LLM calls, memory, session totals, guardrail checks
+  tools/         # Date/time, Tavily search and to-do tools
+  prompts/       # System prompt and <user_input> wrapper
+  guardrails/    # NeMo Guardrails config.yml and prompts.yml
+  utils/         # Cost math, error shape, logging setup
+data/            # Created at runtime: per-user memory and to-do JSON files
 tests/
-└── manual_test_requests.py   # runnable smoke test covering all 5 phases
+  manual_test_requests.py   # Live smoke test, one function per phase
 ```
 
-## Getting started
+## Getting Started
 
 ### Prerequisites
 
-- **Python 3.12.** Not 3.14: NeMo Guardrails' own dependencies don't support 3.14 yet (its `requires_python` explicitly excludes it), and importing it will crash on a newer interpreter.
-- A running Valkey (or Redis) instance
+- Python 3.12 (NeMo Guardrails does not support Python 3.14, so a 3.12 virtual environment is recommended)
+- A running Valkey or Redis instance (Docker is the simplest way to get one)
 - An [OpenAI API key](https://platform.openai.com/)
-- A [Tavily API key](https://tavily.com/) (free tier is fine)
+- A [Tavily API key](https://tavily.com/)
 
-### Setup
+### Installation
 
-1. Create and activate a virtual environment on Python 3.12:
+```bash
+git clone https://github.com/shahramshafiq/devmate-llm-api.git
+cd devmate-llm-api
 
-   ```bash
-   py -3.12 -m venv venv
-   .\venv\Scripts\Activate.ps1
-   ```
+# Windows (PowerShell)
+py -3.12 -m venv venv
+.\venv\Scripts\Activate.ps1
 
-2. Install dependencies:
+# macOS / Linux
+# python3.12 -m venv venv
+# source venv/bin/activate
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+pip install -r requirements.txt
+cp .env.example .env
+```
 
-3. Copy the example environment file and fill in your own keys:
+Fill in `.env`. The app reads these environment variables:
 
-   ```bash
-   cp .env.example .env
-   ```
-
-4. Start Valkey locally:
-
-   ```bash
-   docker run -p 6379:6379 valkey/valkey
-   ```
-
-5. Run the server:
-
-   ```bash
-   python -m uvicorn app.main:app --reload
-   ```
-
-   The API is now at `http://127.0.0.1:8000`, with interactive docs at `http://127.0.0.1:8000/docs`.
-
-## Configuration
-
-All configuration comes from environment variables (see `.env.example`):
-
-| Variable | Description |
+| Variable | Purpose |
 |---|---|
-| `OPENAI_API_KEY` | Your OpenAI API key |
-| `OPENAI_MODEL` | Model used for chat and tool calls (default `gpt-4.1-mini`) |
-| `INPUT_PRICE` / `OUTPUT_PRICE` | Price per 1M tokens, used to compute cost per turn |
-| `TAVILY_API_KEY` | Your Tavily API key, for the web search tool |
-| `TAVILY_TIMEOUT` | Timeout in seconds for Tavily requests (default `10.0`) |
-| `VALKEY_HOST` / `VALKEY_PORT` | Where to reach Valkey (default `localhost:6379`) |
+| `OPENAI_API_KEY` | Required. OpenAI API key |
+| `OPENAI_MODEL` | Chat model, defaults to `gpt-4.1-mini` |
+| `INPUT_PRICE`, `OUTPUT_PRICE` | Required. Price per 1M input and output tokens, used for cost tracking |
+| `TAVILY_API_KEY` | Required. Tavily API key for the web search tool |
+| `TAVILY_TIMEOUT` | Tavily request timeout in seconds, defaults to `10.0` |
+| `VALKEY_HOST`, `VALKEY_PORT` | Valkey location, default `localhost` and `6379` |
 
-## API overview
+The guardrail checks use the model set in `app/guardrails/config.yml`, which is separate from `OPENAI_MODEL`.
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/chat` | Send a message, get a complete reply back |
-| `GET` | `/chat/stream` | Same conversation, streamed as SSE (query params, not a JSON body) |
+### Run
 
-Both take `user_id`, `session_id`, `message`, and optionally `temperature`, `top_p`, `max_tokens`.
+Start Valkey, then start the API from the repository root (the guardrails config and `data/` folder are resolved relative to it):
 
-## How it fits together
+```bash
+docker run -p 6379:6379 valkey/valkey
+python -m uvicorn app.main:app --reload
+```
 
-A request to `/chat` reads recent conversation history from Valkey and any known long-term facts about the user from `data/memory/`, folds both into the prompt, and sends it to the model along with the three tool definitions. If the model asks for a tool, DevMate runs it locally and sends the result back for a final answer, if not, the first response is the answer. Either way, the turn's token usage and cost get calculated, the session's running total gets updated, the turn gets saved back into Valkey for next time, and a background task asks the model whether anything durable was just revealed about the user, saving it to their facts file if so. Before any of that happens, the message passes an input guardrail check, and the generated reply passes an output guardrail check before it's returned.
+The API is served at `http://127.0.0.1:8000`, with interactive docs at `http://127.0.0.1:8000/docs`.
 
-`/chat/stream` currently covers chat, streaming, and cost tracking, but not tools, memory, or guardrails yet, that's deliberately staged for later, not an oversight.
+## Usage
+
+Send a chat message (`temperature`, `top_p` and `max_tokens` are optional):
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "demo", "session_id": "s1", "message": "Add a task to buy groceries"}'
+```
+
+The response contains `reply`, `turn` (`turn_input_tokens`, `turn_output_tokens`, `turn_cost`) and `session` (`session_input_tokens`, `session_output_tokens`, `session_cost`).
+
+Stream a reply over Server-Sent Events (query parameters, not a JSON body):
+
+```bash
+curl -N "http://127.0.0.1:8000/chat/stream?user_id=demo&session_id=s1&message=Say%20hello"
+```
+
+Each event is a line of the form `data: {...}` with a `type` of `content`, `done` (includes `turn` and `session`) or `error`.
 
 ## Testing
 
-- **Postman**: every endpoint was tested interactively during development. An exported collection file isn't in the repo yet.
-- **`tests/manual_test_requests.py`**: a runnable script covering all 5 build phases (basic chat, streaming, tools, memory, guardrails). It makes real calls to OpenAI (and Tavily, for phase 3), so it costs real money to run, it's not a mocked test suite. Run everything with `python tests/manual_test_requests.py`, or just one phase with `python tests/manual_test_requests.py --phase 3`.
-- The tool-result injection test needs one temporary line added to `app/tools/tavily_tool.py`, explained in the script's own output.
+There is no automated test suite yet. `tests/manual_test_requests.py` is a live smoke-test script with one function per phase: basic chat and validation, streaming, tools, memory, and guardrails (five jailbreak categories). It sends real requests to a running server, which in turn calls OpenAI and Tavily, so it costs real money to run.
 
-## Known limitations
+```bash
+pip install requests   # used by the script, not listed in requirements.txt
+python tests/manual_test_requests.py            # all phases
+python tests/manual_test_requests.py --phase 3  # one phase
+```
 
-- `/chat/stream` doesn't yet support tools, memory, or guardrails.
-- Session totals (`SessionService`) live in memory only and reset when the server restarts.
-- Long-term memory and to-do storage are per-user JSON files, not a database, by design for this project's scope.
-- The tool-ordering test (confirming tool selection stays reliable when the tools list is reordered) hasn't been run yet.
+## Limitations and Roadmap
+
+- `/chat/stream` currently supports plain chat and cost tracking only, with no tools, memory or guardrails.
+- Session cost totals are held in process memory and reset when the server restarts.
+- To-do lists and long-term memory are plain per-user JSON files protected by an in-process lock, and the endpoints have no authentication, so this is suited to single-process local use.
+- Mocked automated tests are the next gap to close.
+
+## Author
+
+**Shahram Shafiq** - [GitHub](https://github.com/shahramshafiq) | [LinkedIn](https://www.linkedin.com/in/shahramshafiq/)
